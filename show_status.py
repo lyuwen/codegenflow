@@ -14,7 +14,10 @@ def get_stats(conn):
     """Get comprehensive database statistics."""
     cursor = conn.cursor()
     
+    print("Gathering statistics...", flush=True)
+    
     # Problem statistics
+    print("  - Counting problems...", end="\r", flush=True)
     cursor.execute("SELECT COUNT(*) FROM problems")
     total_problems = cursor.fetchone()[0]
     
@@ -22,6 +25,7 @@ def get_stats(conn):
     problems_by_source = cursor.fetchall()
     
     # Response statistics
+    print("  - Counting responses...", end="\r", flush=True)
     cursor.execute("SELECT COUNT(*) FROM responses")
     total_responses = cursor.fetchone()[0]
     
@@ -32,6 +36,7 @@ def get_stats(conn):
     responses_by_model = cursor.fetchall()
     
     # Detailed error breakdown (top 5)
+    print("  - Analyzing errors...", end="\r", flush=True)
     cursor.execute("""
         SELECT verification_details, COUNT(*) as cnt 
         FROM responses 
@@ -43,6 +48,7 @@ def get_stats(conn):
     top_errors = cursor.fetchall()
     
     # Pass rate statistics
+    print("  - Calculating pass rates...", end="\r", flush=True)
     cursor.execute("""
         SELECT 
             COUNT(CASE WHEN verification_status = 'passed' THEN 1 END) as passed,
@@ -51,6 +57,32 @@ def get_stats(conn):
         FROM responses
     """)
     pass_stats = cursor.fetchone()
+
+    # Total problems per difficulty
+    print("  - Counting problems per difficulty...", end="\r", flush=True)
+    cursor.execute("SELECT difficulty, COUNT(*) FROM problems GROUP BY difficulty")
+    problems_per_difficulty = dict(cursor.fetchall())
+    
+    # Matrix statistics (Model x Difficulty)
+    print("  - Calculating matrix stats (this may take a moment)...", end="\r", flush=True)
+    cursor.execute("""
+        SELECT 
+            r.model,
+            p.difficulty,
+            COUNT(*) as total,
+            AVG(r.completion_tokens) as avg_tokens,
+            SUM(CASE WHEN r.verification_status = 'passed' THEN 1 ELSE 0 END) as passed_count,
+            AVG(CASE WHEN r.verification_status = 'passed' THEN r.completion_tokens END) as avg_passed_tokens,
+            COUNT(DISTINCT CASE WHEN r.verification_status = 'passed' THEN r.problem_id END) as unique_passed_problems,
+            COUNT(DISTINCT r.problem_id) as unique_attempted_problems
+        FROM responses r
+        JOIN problems p ON r.problem_id = p.id
+        WHERE r.verification_status IN ('passed', 'failed')
+        GROUP BY r.model, p.difficulty
+        ORDER BY r.model, p.difficulty
+    """)
+    matrix_stats = cursor.fetchall()
+    print(" " * 50, end="\r", flush=True) # Clear line
     
     return {
         'total_problems': total_problems,
@@ -59,11 +91,15 @@ def get_stats(conn):
         'responses_by_status': responses_by_status,
         'responses_by_model': responses_by_model,
         'top_errors': top_errors,
-        'pass_stats': pass_stats
+        'pass_stats': pass_stats,
+        'matrix_stats': matrix_stats,
+        'problems_per_difficulty': problems_per_difficulty
     }
 
 def format_number(num):
     """Format number with thousands separator."""
+    if num is None:
+        return "0"
     return f"{num:,}"
 
 def print_status(stats):
@@ -124,6 +160,43 @@ def print_status(stats):
     print(f"      Verified: {format_number(verified):>10s} / {format_number(total)}")
     print(f"      Progress: {progress:>9.2f}%")
     
+    # Matrix Statistics
+    if stats['matrix_stats']:
+        print(f"\n   📈 Model Performance by Difficulty:")
+        # Header
+        print(f"      {'Model':<40} {'Diff':<8} {'Pass%':<6} {'AvgTok':<8} {'AvgPassTok':<10} {'Solved':<8} {'TotalProb':<9} {'AvgPass/Prob':<12}")
+        print(f"      {'-'*40} {'-'*8} {'-'*6} {'-'*8} {'-'*10} {'-'*8} {'-'*9} {'-'*12}")
+        
+        current_model = None
+        problems_per_diff = stats.get('problems_per_difficulty', {})
+        
+        for model, difficulty, total, avg_tokens, passed_count, avg_passed_tokens, unique_passed, unique_attempted in stats['matrix_stats']:
+            if model != current_model:
+                if current_model is not None:
+                    print(f"      {'-'*108}")
+                current_model = model
+            
+            pass_rate = (passed_count / total) * 100 if total > 0 else 0
+            avg_tok = avg_tokens if avg_tokens else 0
+            avg_passed = avg_passed_tokens if avg_passed_tokens else 0
+            
+            # Calculate avg passed responses per solved problem
+            avg_passed_per_prob = (passed_count / unique_passed) if unique_passed > 0 else 0
+            
+            # Total problems in this difficulty
+            total_problems_in_diff = problems_per_diff.get(difficulty, 0)
+            
+            model_display = model if model else "Unknown"
+            # Truncate model name if too long
+            if len(model_display) > 38:
+                model_display = model_display[:35] + "..."
+                
+            diff_display = difficulty if difficulty else "Unk"
+            if len(diff_display) > 8:
+                 diff_display = diff_display[:8]
+            
+            print(f"      {model_display:<40} {diff_display:<8} {pass_rate:>5.1f}% {avg_tok:>8.0f} {avg_passed:>10.0f} {unique_passed:>8} {total_problems_in_diff:>9} {avg_passed_per_prob:>12.2f}")
+
     # Top errors
     if stats['top_errors']:
         print(f"\n   ⚠️  Top Error Types:")
@@ -142,7 +215,7 @@ def print_status(stats):
     
     # Model breakdown (if multiple models)
     if len(stats['responses_by_model']) > 1:
-        print(f"\n   🤖 By Model:")
+        print(f"\n   🤖 By Model (Total Responses):")
         for model, count in stats['responses_by_model'][:5]:  # Top 5 models
             percentage = (count / stats['total_responses']) * 100
             model_name = model if model else "(unknown)"

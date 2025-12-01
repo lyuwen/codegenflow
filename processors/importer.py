@@ -42,12 +42,23 @@ class ResponseImporter(Processor):
                         # But INSERT OR IGNORE handles it. 
                         # However, we need problem_id.
                         
+                        # Fix: Strip 'request-' prefix to get the correct problem ID directly
+                        # This avoids relying on request_mappings for the problem_id itself,
+                        # but we still need to know if the problem exists in the DB?
+                        # Actually, importer relies on database.get_problem_id_by_custom_id
+                        # which queries request_mappings. 
+                        # Since we are rebuilding request_mappings with the new ID format,
+                        # this lookup should work fine if mappings are populated.
+                        # BUT, if we want to be robust, we can also derive it here.
+                        
                         problem_id = database.get_problem_id_by_custom_id(custom_id)
                         if not problem_id:
-                            # If mapping doesn't exist, we can't link it. 
-                            # We could try to infer it if we had the logic here, but better to rely on mappings.
-                            # logging.debug(f"Skipping {custom_id}: No problem mapping found.")
-                            continue
+                            # Fallback: try to derive it
+                            if custom_id.startswith('request-'):
+                                problem_id = custom_id[len('request-'):]
+                            else:
+                                problem_id = custom_id
+                            # logging.debug(f" inferred problem_id {problem_id} for {custom_id}")
 
                         response_obj = data.get('response', {})
                         if not response_obj or 'body' not in response_obj:

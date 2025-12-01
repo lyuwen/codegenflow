@@ -1,0 +1,5 @@
+test_*
+test*
+__pycache__
+*.resolved.*
+*.resolved

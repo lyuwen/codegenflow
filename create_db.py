@@ -16,6 +16,7 @@ def create_tables(conn):
             source TEXT,
             original_id TEXT,
             problem_content JSON,
+            origin JSON,
             test_cases JSON
         )
     """)
@@ -56,17 +57,29 @@ def process_req_meta(conn):
                     custom_id = data.get('custom_id')
                     
                     # Determine source and original_id
-                    if 'source' in data:
-                        source = data['source']
-                    elif 'apps' in file_path:
+                    if 'apps' in file_path:
                         source = 'apps'
                     elif 'code_contests' in file_path:
                         source = 'code_contests'
                     elif 'taco' in file_path:
                         source = 'taco'
+                    elif 'codeforce' in file_path:
+                        source = 'codeforces'
+                    elif 'lcb' in file_path:
+                        source = 'code_generation_lite'
                     else:
                         source = 'unknown'
 
+                    if 'source' in data:
+                        origin = data['source']
+                    else:
+                        origin = source
+
+                    # Strip 'request-' prefix to get the correct problem ID
+                    if custom_id.startswith('request-'):
+                        problem_id = custom_id[len('request-'):]
+                    else:
+                        problem_id = custom_id
                     if 'id' in data:
                         original_id = str(data['id'])
                     elif 'cf_contest_id' in data and 'cf_index' in data:
@@ -76,19 +89,38 @@ def process_req_meta(conn):
                     else:
                         # Fallback to custom_id suffix if no other ID found
                         # custom_id format: request-{task}-{i}
-                        original_id = custom_id.split('-')[-1]
+                         original_id = problem_id
 
-                    problem_id = get_problem_id(source, original_id)
+                    # Problem ID should be the original_id (which now includes source like 'apps-0')
+                    # The previous logic was f"{source}-{original_id}", but if original_id is 'apps-0', we don't want 'apps-apps-0'.
+                    # Let's check if original_id already contains the source.
+                    
+                    # Actually, the user wants to "extract the custom_id and remove the prefix 'requests-'".
+                    # So if custom_id is 'request-code-apps-0', the problem_id should be 'code-apps-0'.
+                    # This seems to be what the user implies.
+                    
+                    # problem_id = original_id
+                    
+                    # Update custom_id_map
                     custom_id_map[custom_id] = problem_id
                     
                     # Prepare data for insertion
-                    test_cases = json.dumps(data.get('test_cases', []))
+                    test_cases_raw = data.get('test_cases', [])
+                    if not test_cases_raw and 'official_tests' in data:
+                        # Normalize official_tests (list of dicts) to expected format (dict of lists)
+                        official_tests = data['official_tests']
+                        if official_tests:
+                            inputs = [t.get('input', '') for t in official_tests]
+                            outputs = [t.get('output', '') for t in official_tests]
+                            test_cases_raw = {"inputs": inputs, "outputs": outputs}
+                    
+                    test_cases = json.dumps(test_cases_raw)
                     problem_content = json.dumps(data)
                     
                     cursor.execute("""
-                        INSERT OR IGNORE INTO problems (id, source, original_id, problem_content, test_cases)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (problem_id, source, original_id, problem_content, test_cases))
+                        INSERT OR IGNORE INTO problems (id, source, original_id, problem_content, origin, test_cases)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (problem_id, source, original_id, problem_content, origin, test_cases))
                     
                 except json.JSONDecodeError:
                     continue

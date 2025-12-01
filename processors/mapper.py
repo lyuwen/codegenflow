@@ -37,28 +37,11 @@ class RequestMapper(Processor):
                         if not custom_id:
                             continue
 
-                        # Determine source and original_id
-                        if 'source' in data:
-                            source = data['source']
-                        elif 'apps' in file_path:
-                            source = 'apps'
-                        elif 'code_contests' in file_path:
-                            source = 'code_contests'
-                        elif 'taco' in file_path:
-                            source = 'taco'
+                        # Fix: Strip 'request-' prefix to get the correct problem ID
+                        if custom_id.startswith('request-'):
+                            problem_id = custom_id[len('request-'):]
                         else:
-                            source = 'unknown'
-
-                        if 'id' in data:
-                            original_id = str(data['id'])
-                        elif 'cf_contest_id' in data and 'cf_index' in data:
-                            original_id = f"{data['cf_contest_id']}_{data['cf_index']}"
-                        elif 'name' in data:
-                             original_id = data['name']
-                        else:
-                            original_id = custom_id.split('-')[-1]
-
-                        problem_id = f"{source}-{original_id}"
+                            problem_id = custom_id
                         
                         database.insert_request_mapping(custom_id, problem_id)
                         count += 1

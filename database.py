@@ -39,6 +39,8 @@ class ReasoningDatabase:
         self.create_index("idx_responses_model", "responses", "model")
         self.create_index("idx_problems_source", "problems", "source")
         self.create_index("idx_problems_difficulty", "problems", "difficulty")
+        # Covering index for status reporting
+        self.create_index("idx_responses_stats", "responses", "verification_status, problem_id, model, completion_tokens")
 
     def create_table_if_not_exists(self, table_name: str, schema: str):
         cursor = self.conn.cursor()

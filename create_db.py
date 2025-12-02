@@ -4,51 +4,21 @@ import os
 import glob
 import re
 from tqdm import tqdm
+from database import ReasoningDatabase
 
 DB_PATH = "problems.db"
 DATA_DIR = "/mnt/huawei/users/lfu/datasets/reasoning/lfu-code-r1-v2"
 
-def create_tables(conn):
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS problems (
-            id TEXT PRIMARY KEY,
-            source TEXT,
-            original_id TEXT,
-            problem_content JSON,
-            origin JSON,
-            test_cases JSON
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS responses (
-            id TEXT PRIMARY KEY,
-            problem_id TEXT,
-            model TEXT,
-            full_response_text TEXT,
-            full_response_json JSON,
-            reasoning_trace TEXT,
-            extracted_code TEXT,
-            completion_tokens INTEGER,
-            verifiable BOOLEAN,
-            FOREIGN KEY (problem_id) REFERENCES problems (id)
-        )
-    """)
-    conn.commit()
-
 def get_problem_id(source, original_id):
     return f"{source}-{original_id}"
 
-def process_req_meta(conn):
-    cursor = conn.cursor()
+def process_req_meta(db: ReasoningDatabase):
     files = glob.glob(os.path.join(DATA_DIR, "**/req-meta-*.jsonl"), recursive=True)
     
     custom_id_map = {} # custom_id -> problem_id
 
     for file_path in tqdm(files, desc="Processing req-meta files"):
         source_dir = os.path.basename(os.path.dirname(os.path.dirname(file_path))) # e.g., apps, code_contests
-        # Adjust source extraction if needed, but 'apps', 'code_contests' seems consistent
-        # Actually, let's rely on the filename or content 'source' field if available
         
         with open(file_path, 'r') as f:
             for line in f:
@@ -91,18 +61,11 @@ def process_req_meta(conn):
                         # custom_id format: request-{task}-{i}
                          original_id = problem_id
 
-                    # Problem ID should be the original_id (which now includes source like 'apps-0')
-                    # The previous logic was f"{source}-{original_id}", but if original_id is 'apps-0', we don't want 'apps-apps-0'.
-                    # Let's check if original_id already contains the source.
-                    
-                    # Actually, the user wants to "extract the custom_id and remove the prefix 'requests-'".
-                    # So if custom_id is 'request-code-apps-0', the problem_id should be 'code-apps-0'.
-                    # This seems to be what the user implies.
-                    
-                    # problem_id = original_id
-                    
                     # Update custom_id_map
                     custom_id_map[custom_id] = problem_id
+                    
+                    # Persist mapping to DB
+                    db.insert_request_mapping(custom_id, problem_id)
                     
                     # Prepare data for insertion
                     test_cases_raw = data.get('test_cases', [])
@@ -114,13 +77,28 @@ def process_req_meta(conn):
                             outputs = [t.get('output', '') for t in official_tests]
                             test_cases_raw = {"inputs": inputs, "outputs": outputs}
                     
-                    test_cases = json.dumps(test_cases_raw)
-                    problem_content = json.dumps(data)
+                    # Extract difficulty if available (for code_generation_lite or others)
+                    raw_difficulty = None
+                    if source == 'codeforces':
+                        raw_difficulty = data.get('rating')
+                    elif source == 'code_generation_lite':
+                        raw_difficulty = data.get('difficulty')
+                    elif 'difficulty' in data:
+                        raw_difficulty = data['difficulty']
                     
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO problems (id, source, original_id, problem_content, origin, test_cases)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (problem_id, source, original_id, problem_content, origin, test_cases))
+                    difficulty = get_difficulty(raw_difficulty)
+                    
+                    problem_data = {
+                        "id": problem_id,
+                        "source": source,
+                        "original_id": original_id,
+                        "problem_content": json.dumps(data),
+                        "origin": json.dumps(origin),
+                        "test_cases": json.dumps(test_cases_raw),
+                        "difficulty": difficulty
+                    }
+                    
+                    db.insert_problem(problem_data)
                     
                 except json.JSONDecodeError:
                     continue
@@ -128,14 +106,33 @@ def process_req_meta(conn):
                     print(f"Error processing line in {file_path}: {e}")
                     continue
     
-    conn.commit()
     return custom_id_map
+
+def get_difficulty(val):
+    """Normalize difficulty rating."""
+    if val is None or val == "":
+        return 'unknown'
+    
+    val_str = str(val).lower().strip()
+    if val_str in ['easy', 'medium', 'hard']:
+        return val_str
+        
+    # Try numeric (Codeforces ratings etc)
+    try:
+        rating = float(val)
+        if rating < 1200:
+            return 'easy'
+        elif rating < 1600:
+            return 'medium'
+        else:
+            return 'hard'
+    except ValueError:
+        pass
+        
+    return 'unknown'
 
 def extract_code(text):
     # Extract code from ``` blocks
-    # If multiple blocks, join them or take the last one? 
-    # Usually the solution is in a python block.
-    # Let's extract all code blocks.
     matches = re.findall(r'```[^\n]*\n(.*?)```', text, re.DOTALL)
     if matches:
         return "\n\n".join(matches)
@@ -160,8 +157,7 @@ def extract_reasoning(text, json_body=None):
     
     return ""
 
-def process_responses(conn, custom_id_map):
-    cursor = conn.cursor()
+def process_responses(db: ReasoningDatabase, custom_id_map):
     files = glob.glob(os.path.join(DATA_DIR, "**/responses-*.jsonl"), recursive=True)
     
     for file_path in tqdm(files, desc="Processing response files"):
@@ -172,8 +168,6 @@ def process_responses(conn, custom_id_map):
                     custom_id = data.get('custom_id')
                     
                     if custom_id not in custom_id_map:
-                        # Try to infer problem_id if missing from map (maybe partial run)
-                        # But for now, skip if not linked
                         continue
                         
                     problem_id = custom_id_map[custom_id]
@@ -206,34 +200,39 @@ def process_responses(conn, custom_id_map):
                     # Response ID from the API response, or generate one
                     response_id = body.get('id', custom_id) # Use API ID if available
 
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO responses (
-                            id, problem_id, model, full_response_text, full_response_json,
-                            reasoning_trace, extracted_code, completion_tokens, verifiable
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (response_id, problem_id, model, full_response_text, full_response_json,
-                          reasoning_trace, extracted_code, completion_tokens, verifiable))
+                    response_data = {
+                        "id": response_id,
+                        "problem_id": problem_id,
+                        "model": model,
+                        "full_response_text": full_response_text,
+                        "full_response_json": full_response_json,
+                        "reasoning_trace": reasoning_trace,
+                        "extracted_code": extracted_code,
+                        "completion_tokens": completion_tokens,
+                        "verifiable": verifiable,
+                        "verification_status": "pending" # Default status
+                    }
+                    
+                    db.insert_response(response_data)
                           
                 except json.JSONDecodeError:
                     continue
                 except Exception as e:
                     print(f"Error processing line in {file_path}: {e}")
                     continue
-    conn.commit()
 
 def main():
-    conn = sqlite3.connect(DB_PATH)
-    create_tables(conn)
+    db = ReasoningDatabase(DB_PATH)
+    # ensure_schema is called in __init__
     
     print("Processing req-meta files...")
-    custom_id_map = process_req_meta(conn)
+    custom_id_map = process_req_meta(db)
     print(f"Loaded {len(custom_id_map)} problem mappings.")
     
     print("Processing response files...")
-    process_responses(conn, custom_id_map)
+    process_responses(db, custom_id_map)
     
-    conn.close()
+    db.close()
     print("Database population complete.")
 
 if __name__ == "__main__":

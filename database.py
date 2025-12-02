@@ -20,7 +20,30 @@ class ReasoningDatabase:
 
     def ensure_schema(self):
         """Ensures the database schema exists and has necessary columns."""
-        # Tables should already be created by create_db.py, but we can verify or add columns
+        # Create tables if they don't exist
+        self.create_table_if_not_exists("problems", """
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            original_id TEXT,
+            problem_content JSON,
+            origin JSON,
+            test_cases JSON
+        """)
+        
+        self.create_table_if_not_exists("responses", """
+            id TEXT PRIMARY KEY,
+            problem_id TEXT,
+            model TEXT,
+            full_response_text TEXT,
+            full_response_json JSON,
+            reasoning_trace TEXT,
+            extracted_code TEXT,
+            completion_tokens INTEGER,
+            verifiable BOOLEAN,
+            FOREIGN KEY (problem_id) REFERENCES problems (id)
+        """)
+
+        # Add columns if missing (for migrations)
         self.add_column("responses", "verification_status", "TEXT DEFAULT 'pending'")
         self.add_column("responses", "verification_details", "JSON")
         

@@ -1,5 +1,7 @@
 import argparse
 import logging
+import os
+from dotenv import load_dotenv
 from database import ReasoningDatabase
 from processors.verifier import ResponseVerifier
 from processors.importer import ResponseImporter
@@ -12,14 +14,19 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-DB_PATH = "problems.db"
+# Load environment variables from .env file
+load_dotenv()
+
+# Default to Postgres from env, or fallback to a safe default (e.g. sqlite or error)
+# User requested NOT to write raw db url in code.
+DEFAULT_DB_URL = os.environ.get("DB_URL")
 DEFAULT_SANDBOX_ENDPOINT = "http://127.0.0.1:8080"
 # DEFAULT_SANDBOX_ENDPOINT = "http://127.0.0.1:8880"
 
 def main():
     parser = argparse.ArgumentParser(description="Reasoning Pipeline")
     # parser.add_argument("--task", choices=["verify", "import", "map", "import-problems"], required=True, help="Task to perform")
-    parser.add_argument("--db", default=DB_PATH, help="Path to SQLite database")
+    parser.add_argument("--db", default=DEFAULT_DB_URL, help="Database URL (Postgres or SQLite). Defaults to DB_URL in .env")
     parser.add_argument("--endpoint", default=DEFAULT_SANDBOX_ENDPOINT, help="Sandbox endpoint")
     parser.add_argument("--concurrency", type=int, default=8, help="Concurrency for verification")
     parser.add_argument("--limit", type=int, default=10000, help="Limit number of responses to verify")
@@ -64,6 +71,11 @@ def main():
     
     args = parser.parse_args()
     
+    if not args.db:
+        print("Error: Database URL must be provided via --db or DB_URL environment variable (.env)")
+        return
+
+    # Initialize database with URL
     db = ReasoningDatabase(args.db)
     
     if args.command == "verify":
@@ -117,8 +129,10 @@ def main():
         importer = ProblemImporter(args.pattern)
         importer.process(db)
     elif args.command == "generate":
-        db_path = args.db
-        generator = PromptGenerator(db_path)
+        # Generator needs the DB instance or URL. 
+        # The original generator took db_path. We should update it to take the db instance or url.
+        # Let's pass the db instance.
+        generator = PromptGenerator(db)
         generator.generate(
             output_file=args.output,
             model=args.model,
@@ -128,7 +142,8 @@ def main():
             offset=args.offset
         )
     
-    db.close()
+    # db.close() # SQLAlchemy engine doesn't strictly need explicit close, but good practice if we want to dispose pool
+    # db.engine.dispose() 
 
 if __name__ == "__main__":
     main()

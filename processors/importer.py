@@ -1,3 +1,4 @@
+import time
 import json
 import logging
 import glob
@@ -72,6 +73,7 @@ class ResponseImporter(Processor):
                         full_response_text = choices[0]['message']['content']
                         model = body.get('model', 'unknown')
                         completion_tokens = body.get('usage', {}).get('completion_tokens', 0)
+                        created = body.get('created', time.time())
                         
                         # Extract reasoning and code (reusing logic or duplicating simple logic)
                         # Ideally we move extraction logic to a util
@@ -90,7 +92,8 @@ class ResponseImporter(Processor):
                             "extracted_code": extracted_code,
                             "completion_tokens": completion_tokens,
                             "verifiable": True, # Default
-                            "verification_status": "pending"
+                            "verification_status": "pending",
+                            "timestamp": created
                         }
                         
                         database.insert_response(record)

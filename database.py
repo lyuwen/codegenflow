@@ -40,12 +40,14 @@ class ReasoningDatabase:
             extracted_code TEXT,
             completion_tokens INTEGER,
             verifiable BOOLEAN,
+            timestamp TIMESTAMP,
             FOREIGN KEY (problem_id) REFERENCES problems (id)
         """)
 
         # Add columns if missing (for migrations)
         self.add_column("responses", "verification_status", "TEXT DEFAULT 'pending'")
         self.add_column("responses", "verification_details", "JSON")
+        self.add_column("responses", "timestamp", "TIMESTAMP")
         
         # Table for mapping custom_id (from requests) to problem_id
         self.create_table_if_not_exists("request_mappings", """
@@ -64,6 +66,8 @@ class ReasoningDatabase:
         self.create_index("idx_problems_difficulty", "problems", "difficulty")
         # Covering index for status reporting
         self.create_index("idx_responses_stats", "responses", "verification_status, problem_id, model, completion_tokens")
+        self.create_index("idx_responses_stats_timestamp", "responses", "verification_status, problem_id, model, completion_tokens, timestamp")
+        self.create_index("idx_responses_timestamp", "responses", "timestamp")
 
     def create_table_if_not_exists(self, table_name: str, schema: str):
         cursor = self.conn.cursor()

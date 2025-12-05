@@ -4,85 +4,84 @@ Database Status Tool
 Shows statistics and verification progress for the problems database.
 """
 
-import sqlite3
+import os
 import json
 from datetime import datetime
+from dotenv import load_dotenv
+from sqlalchemy import text
+from database import ReasoningDatabase
 
-DB_PATH = "problems.db"
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 
-def get_stats(conn):
+def get_stats(db):
     """Get comprehensive database statistics."""
-    cursor = conn.cursor()
-    
     print("Gathering statistics...", flush=True)
     
-    # Problem statistics
-    print("  - Counting problems...", end="\r", flush=True)
-    cursor.execute("SELECT COUNT(*) FROM problems")
-    total_problems = cursor.fetchone()[0]
+    with db.engine.connect() as conn:
+        # Problem statistics
+        print("  - Counting problems...", end="\r", flush=True)
+        total_problems = conn.execute(text("SELECT COUNT(*) FROM problems")).scalar()
+        
+        problems_by_source = conn.execute(text("SELECT source, COUNT(*) FROM problems GROUP BY source ORDER BY source")).fetchall()
+        
+        # Response statistics
+        print("  - Counting responses...", end="\r", flush=True)
+        total_responses = conn.execute(text("SELECT COUNT(*) FROM responses")).scalar()
+        
+        responses_by_status = conn.execute(text("SELECT verification_status, COUNT(*) FROM responses GROUP BY verification_status ORDER BY verification_status")).fetchall()
+        
+        responses_by_model = conn.execute(text("SELECT model, COUNT(*) FROM responses GROUP BY model ORDER BY COUNT(*) DESC")).fetchall()
+        
+        # Detailed error breakdown (top 5)
+        print("  - Analyzing errors...", end="\r", flush=True)
+        # Note: verification_details is JSON/JSONB. Grouping by it might be slow or behave differently across DBs.
+        # Casting to text might be safer for grouping if it's a complex object.
+        # For now, we assume it works or we cast if needed.
+        # Postgres requires casting JSONB to TEXT to group by it easily if not using specific operators, 
+        # but standard GROUP BY works for equality.
+        top_errors = conn.execute(text("""
+            SELECT verification_details, COUNT(*) as cnt 
+            FROM responses 
+            WHERE verification_status = 'error' 
+            GROUP BY verification_details 
+            ORDER BY cnt DESC 
+            LIMIT 5
+        """)).fetchall()
+        
+        # Pass rate statistics
+        print("  - Calculating pass rates...", end="\r", flush=True)
+        pass_stats = conn.execute(text("""
+            SELECT 
+                COUNT(CASE WHEN verification_status = 'passed' THEN 1 END) as passed,
+                COUNT(CASE WHEN verification_status = 'failed' THEN 1 END) as failed,
+                COUNT(CASE WHEN verification_status IN ('passed', 'failed') THEN 1 END) as total_verified
+            FROM responses
+        """)).fetchone()
     
-    cursor.execute("SELECT source, COUNT(*) FROM problems GROUP BY source ORDER BY source")
-    problems_by_source = cursor.fetchall()
-    
-    # Response statistics
-    print("  - Counting responses...", end="\r", flush=True)
-    cursor.execute("SELECT COUNT(*) FROM responses")
-    total_responses = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT verification_status, COUNT(*) FROM responses GROUP BY verification_status ORDER BY verification_status")
-    responses_by_status = cursor.fetchall()
-    
-    cursor.execute("SELECT model, COUNT(*) FROM responses GROUP BY model ORDER BY COUNT(*) DESC")
-    responses_by_model = cursor.fetchall()
-    
-    # Detailed error breakdown (top 5)
-    print("  - Analyzing errors...", end="\r", flush=True)
-    cursor.execute("""
-        SELECT verification_details, COUNT(*) as cnt 
-        FROM responses 
-        WHERE verification_status = 'error' 
-        GROUP BY verification_details 
-        ORDER BY cnt DESC 
-        LIMIT 5
-    """)
-    top_errors = cursor.fetchall()
-    
-    # Pass rate statistics
-    print("  - Calculating pass rates...", end="\r", flush=True)
-    cursor.execute("""
-        SELECT 
-            COUNT(CASE WHEN verification_status = 'passed' THEN 1 END) as passed,
-            COUNT(CASE WHEN verification_status = 'failed' THEN 1 END) as failed,
-            COUNT(CASE WHEN verification_status IN ('passed', 'failed') THEN 1 END) as total_verified
-        FROM responses
-    """)
-    pass_stats = cursor.fetchone()
-
-    # Total problems per difficulty
-    print("  - Counting problems per difficulty...", end="\r", flush=True)
-    cursor.execute("SELECT difficulty, COUNT(*) FROM problems GROUP BY difficulty")
-    problems_per_difficulty = dict(cursor.fetchall())
-    
-    # Matrix statistics (Model x Difficulty)
-    print("  - Calculating matrix stats (this may take a moment)...", end="\r", flush=True)
-    cursor.execute("""
-        SELECT 
-            r.model,
-            p.difficulty,
-            COUNT(*) as total,
-            AVG(r.completion_tokens) as avg_tokens,
-            SUM(CASE WHEN r.verification_status = 'passed' THEN 1 ELSE 0 END) as passed_count,
-            AVG(CASE WHEN r.verification_status = 'passed' THEN r.completion_tokens END) as avg_passed_tokens,
-            COUNT(DISTINCT CASE WHEN r.verification_status = 'passed' THEN r.problem_id END) as unique_passed_problems,
-            COUNT(DISTINCT r.problem_id) as unique_attempted_problems
-        FROM responses r
-        JOIN problems p ON r.problem_id = p.id
-        WHERE r.verification_status IN ('passed', 'failed')
-        GROUP BY r.model, p.difficulty
-        ORDER BY r.model, p.difficulty
-    """)
-    matrix_stats = cursor.fetchall()
-    print(" " * 50, end="\r", flush=True) # Clear line
+        # Total problems per difficulty
+        print("  - Counting problems per difficulty...", end="\r", flush=True)
+        problems_per_difficulty = dict(conn.execute(text("SELECT difficulty, COUNT(*) FROM problems GROUP BY difficulty")).fetchall())
+        
+        # Matrix statistics (Model x Difficulty)
+        print("  - Calculating matrix stats (this may take a moment)...", end="\r", flush=True)
+        matrix_stats = conn.execute(text("""
+            SELECT 
+                r.model,
+                p.difficulty,
+                COUNT(*) as total,
+                AVG(r.completion_tokens) as avg_tokens,
+                SUM(CASE WHEN r.verification_status = 'passed' THEN 1 ELSE 0 END) as passed_count,
+                AVG(CASE WHEN r.verification_status = 'passed' THEN r.completion_tokens END) as avg_passed_tokens,
+                COUNT(DISTINCT CASE WHEN r.verification_status = 'passed' THEN r.problem_id END) as unique_passed_problems,
+                COUNT(DISTINCT r.problem_id) as unique_attempted_problems
+            FROM responses r
+            JOIN problems p ON r.problem_id = p.id
+            WHERE r.verification_status IN ('passed', 'failed')
+            GROUP BY r.model, p.difficulty
+            ORDER BY r.model, p.difficulty
+        """)).fetchall()
+        print(" " * 50, end="\r", flush=True) # Clear line
     
     return {
         'total_problems': total_problems,
@@ -202,8 +201,13 @@ def print_status(stats):
         print(f"\n   ⚠️  Top Error Types:")
         for i, (error_json, count) in enumerate(stats['top_errors'], 1):
             try:
-                error_data = json.loads(error_json)
-                error_msg = error_data.get('error', 'Unknown')
+                # error_json might be a dict (if SQLAlchemy decoded it) or string
+                if isinstance(error_json, str):
+                    error_data = json.loads(error_json)
+                else:
+                    error_data = error_json
+                    
+                error_msg = error_data.get('error', 'Unknown') if error_data else 'Unknown'
                 # Truncate long error messages
                 if len(error_msg) > 60:
                     error_msg = error_msg[:57] + "..."
@@ -224,14 +228,15 @@ def print_status(stats):
     print("\n" + "=" * 80)
 
 def main():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        stats = get_stats(conn)
-        print_status(stats)
-        conn.close()
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    if not DB_URL:
+        print("Error: DB_URL not found in .env")
         return 1
+
+    try:
+        db = ReasoningDatabase(DB_URL)
+        stats = get_stats(db)
+        print_status(stats)
+        # db.close()
     except Exception as e:
         print(f"Error: {e}")
         return 1

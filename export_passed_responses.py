@@ -1,13 +1,19 @@
-import sqlite3
 import json
 import os
 import multiprocessing
+import argparse
+from datetime import datetime
 from tqdm import tqdm
 import time
+from dotenv import load_dotenv
+from sqlalchemy import select, and_
+from database import ReasoningDatabase
 
-DB_PATH = "problems.db"
+# Load environment variables
+load_dotenv()
+DB_URL = os.environ.get("DB_URL")
 OUTPUT_FILE = "passed_responses-1.jsonl"
-NUM_WORKERS = max(1, os.cpu_count() - 1)
+NUM_WORKERS = min(4, max(1, os.cpu_count() - 1))
 
 def get_problem_text(content, source):
     """Extract problem description based on source."""
@@ -21,12 +27,11 @@ def get_problem_text(content, source):
         # codeforces, code_contests, and others usually use 'description'
         return content.get('description', '')
 
-def worker(input_queue, output_queue):
+def worker(db_url, input_queue, output_queue, filters):
     """Worker process to fetch data and format it."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        # Initialize database connection in worker
+        db = ReasoningDatabase(db_url)
         
         while True:
             problem_id = input_queue.get()
@@ -35,55 +40,79 @@ def worker(input_queue, output_queue):
             
             try:
                 # Fetch problem details
-                cursor.execute("SELECT source, original_id, origin, difficulty, problem_content FROM problems WHERE id = ?", (problem_id,))
-                prob_row = cursor.fetchone()
+                query = select(db.problems).where(db.problems.c.id == problem_id)
+                
+                with db.engine.connect() as conn:
+                    prob_row = conn.execute(query).fetchone()
                 
                 if not prob_row:
                     continue
                 
-                # Fetch responses
-                cursor.execute("""
-                    SELECT id, model, full_response_text, reasoning_trace, completion_tokens 
-                    FROM responses 
-                    WHERE problem_id = ? AND verification_status = 'passed'
-                """, (problem_id,))
-                resp_rows = cursor.fetchall()
+                # Build response query with filters
+                conditions = [
+                    db.responses.c.problem_id == problem_id,
+                    db.responses.c.verification_status == 'passed'
+                ]
+                
+                if filters.get('after'):
+                    conditions.append(db.responses.c.timestamp >= filters['after'])
+                if filters.get('before'):
+                    conditions.append(db.responses.c.timestamp <= filters['before'])
+                
+                resp_query = select(
+                    db.responses.c.id, 
+                    db.responses.c.model, 
+                    db.responses.c.full_response_text, 
+                    db.responses.c.reasoning_trace, 
+                    db.responses.c.completion_tokens,
+                    db.responses.c.timestamp
+                ).where(and_(*conditions))
+                
+                with db.engine.connect() as conn:
+                    resp_rows = conn.execute(resp_query).fetchall()
                 
                 if not resp_rows:
                     continue
 
                 # Parse problem content
-                try:
-                    problem_content = json.loads(prob_row['problem_content'])
-                except:
+                problem_content = prob_row.problem_content
+                if isinstance(problem_content, str):
+                    try:
+                        problem_content = json.loads(problem_content)
+                    except:
+                        problem_content = {}
+                elif problem_content is None:
                     problem_content = {}
                     
-                try:
-                    origin = json.loads(prob_row['origin'])
-                except:
-                    origin = prob_row['origin']
+                origin = prob_row.origin
+                if isinstance(origin, str):
+                    try:
+                        origin = json.loads(origin)
+                    except:
+                        pass 
                 
-                problem_text = get_problem_text(problem_content, prob_row['source'])
+                problem_text = get_problem_text(problem_content, prob_row.source)
                 
                 # Format responses
                 responses_list = []
                 for r in resp_rows:
                     responses_list.append({
                         "role": "assistant",
-                        "content": r['full_response_text'],
-                        "reasoning_content": r['reasoning_trace'],
-                        "id": r['id'],
-                        "model": r['model'],
-                        "completion_tokens": r['completion_tokens']
+                        "content": r.full_response_text,
+                        "reasoning_content": r.reasoning_trace,
+                        "id": r.id,
+                        "model": r.model,
+                        "completion_tokens": r.completion_tokens,
+                        "timestamp": r.timestamp.isoformat() if r.timestamp else None
                     })
                 
                 output_data = {
                     "problem_id": problem_id,
                     "problem": problem_text,
-                    "source": prob_row['source'],
-                    "original_id": prob_row['original_id'],
+                    "source": prob_row.source,
+                    "original_id": prob_row.original_id,
                     "origin": origin,
-                    "difficulty": prob_row['difficulty'],
+                    "difficulty": prob_row.difficulty,
                     "responses": responses_list
                 }
                 
@@ -94,13 +123,10 @@ def worker(input_queue, output_queue):
                 
     except Exception as e:
         print(f"Worker initialization failed: {e}")
-    finally:
-        if conn:
-            conn.close()
 
-def writer(output_queue, total_count):
+def writer(output_queue, total_count, output_file):
     """Writer process to write results to file."""
-    with open(OUTPUT_FILE, 'w') as f:
+    with open(output_file, 'w') as f:
         pbar = tqdm(total=total_count, desc="Exporting")
         count = 0
         while count < total_count:
@@ -110,17 +136,59 @@ def writer(output_queue, total_count):
             count += 1
         pbar.close()
 
+def parse_datetime(s):
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Not a valid date: {s}")
+
 def main():
+    parser = argparse.ArgumentParser(description="Export passed responses")
+    parser.add_argument("--output", default=OUTPUT_FILE, help="Output JSONL file")
+    parser.add_argument("--after", type=parse_datetime, help="Filter responses after this timestamp (ISO format or YYYY-MM-DD)")
+    parser.add_argument("--before", type=parse_datetime, help="Filter responses before this timestamp (ISO format or YYYY-MM-DD)")
+    parser.add_argument("--difficulty", help="Filter by difficulty (comma-separated)")
+    
+    parser.add_argument("--db", help="Database URL or path (default: from .env)")
+    
+    args = parser.parse_args()
+
+    db_url = args.db if args.db else DB_URL
+    if not db_url:
+        print("Error: DB_URL not found in .env and --db not provided")
+        return
+
     # Get list of problems with passed responses
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+    db = ReasoningDatabase(db_url)
     print("Fetching problem IDs...")
-    cursor.execute("SELECT DISTINCT problem_id FROM responses WHERE verification_status = 'passed'")
-    problem_ids = [row[0] for row in cursor.fetchall()]
-    conn.close()
+    
+    # Build query to select problem IDs
+    # We join responses and problems to filter by difficulty
+    # We also filter responses by status and timestamp
+    
+    j = db.responses.join(db.problems, db.responses.c.problem_id == db.problems.c.id)
+    
+    conditions = [db.responses.c.verification_status == 'passed']
+    
+    if args.after:
+        conditions.append(db.responses.c.timestamp >= args.after)
+    if args.before:
+        conditions.append(db.responses.c.timestamp <= args.before)
+    
+    if args.difficulty:
+        diffs = [d.strip() for d in args.difficulty.split(',')]
+        conditions.append(db.problems.c.difficulty.in_(diffs))
+        
+    query = select(db.responses.c.problem_id).select_from(j).where(and_(*conditions)).distinct()
+    
+    with db.engine.connect() as conn:
+        problem_ids = [row[0] for row in conn.execute(query).fetchall()]
     
     total_problems = len(problem_ids)
-    print(f"Found {total_problems} problems with passed responses.")
+    print(f"Found {total_problems} problems matching criteria.")
     
     if total_problems == 0:
         return
@@ -137,16 +205,22 @@ def main():
     for _ in range(NUM_WORKERS):
         input_queue.put(None)
         
+    # Prepare filters for workers
+    worker_filters = {
+        'after': args.after,
+        'before': args.before
+    }
+        
     # Start workers
     print(f"Starting {NUM_WORKERS} workers...")
     workers = []
     for _ in range(NUM_WORKERS):
-        p = multiprocessing.Process(target=worker, args=(input_queue, output_queue))
+        p = multiprocessing.Process(target=worker, args=(db_url, input_queue, output_queue, worker_filters))
         p.start()
         workers.append(p)
         
     # Start writer
-    writer_process = multiprocessing.Process(target=writer, args=(output_queue, total_problems))
+    writer_process = multiprocessing.Process(target=writer, args=(output_queue, total_problems, args.output))
     writer_process.start()
     
     # Wait for workers

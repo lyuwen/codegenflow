@@ -5,6 +5,7 @@ Shows statistics and verification progress for the problems database.
 """
 
 import os
+import argparse
 import json
 from datetime import datetime
 from dotenv import load_dotenv
@@ -228,12 +229,18 @@ def print_status(stats):
     print("\n" + "=" * 80)
 
 def main():
-    if not DB_URL:
-        print("Error: DB_URL not found in .env")
+    parser = argparse.ArgumentParser(description="Show database status")
+    parser.add_argument("--db", help="Database URL or path (default: from .env)")
+    args = parser.parse_args()
+
+    db_url = args.db if args.db else DB_URL
+
+    if not db_url:
+        print("Error: DB_URL not found in .env and --db not provided")
         return 1
 
     try:
-        db = ReasoningDatabase(DB_URL)
+        db = ReasoningDatabase(db_url)
         stats = get_stats(db)
         print_status(stats)
         # db.close()

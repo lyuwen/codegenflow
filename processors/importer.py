@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 import json
 import logging
 import glob
@@ -70,14 +71,14 @@ class ResponseImporter(Processor):
                             "id": response_id,
                             "problem_id": problem_id,
                             "model": model,
-                            "full_response_text": full_response_text,
+                            "full_response_text": self._sanitize_string(full_response_text),
                             "full_response_json": response_obj, # Pass object directly
-                            "reasoning_trace": reasoning_trace,
-                            "extracted_code": extracted_code,
+                            "reasoning_trace": self._sanitize_string(reasoning_trace),
+                            "extracted_code": self._sanitize_string(extracted_code),
                             "completion_tokens": completion_tokens,
                             "verifiable": True, # Default
                             "verification_status": "pending",
-                            "timestamp": created
+                            "timestamp": datetime.fromtimestamp(created)
                         }
                         
                         database.insert_response(record)
@@ -89,6 +90,12 @@ class ResponseImporter(Processor):
             logging.error(f"Error reading file {file_path}: {e}")
             
         return count
+
+    
+    def _sanitize_string(self, text):
+        if isinstance(text, str):
+            return text.replace('\x00', '')
+        return text
 
     def _extract_code(self, text):
         import re

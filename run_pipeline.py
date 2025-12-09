@@ -1,3 +1,4 @@
+from datetime import datetime
 import argparse
 import logging
 import os
@@ -22,6 +23,16 @@ load_dotenv()
 DEFAULT_DB_URL = os.environ.get("DB_URL")
 DEFAULT_SANDBOX_ENDPOINT = "http://127.0.0.1:8080"
 # DEFAULT_SANDBOX_ENDPOINT = "http://127.0.0.1:8880"
+
+
+def parse_datetime(s):
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Not a valid date: {s}")
 
 def main():
     parser = argparse.ArgumentParser(description="Reasoning Pipeline")
@@ -69,6 +80,15 @@ def main():
     gen_parser.add_argument("--limit", type=int, help="Limit number of prompts")
     gen_parser.add_argument("--offset", type=int, default=0, help="Offset for pagination")
     
+
+    # Export subparser
+    export_parser = subparsers.add_parser("export", help="Export passed responses")
+    export_parser.add_argument("--output", required=True, help="Output JSONL file")
+    export_parser.add_argument("--after", type=parse_datetime, help="Filter responses after this timestamp (ISO format or YYYY-MM-DD)")
+    export_parser.add_argument("--before", type=parse_datetime, help="Filter responses before this timestamp (ISO format or YYYY-MM-DD)")
+    export_parser.add_argument("--difficulty", help="Filter by difficulty (comma-separated)")
+    export_parser.add_argument("--status", default="passed", help="Filter by verification status (default: passed)")
+
     args = parser.parse_args()
     
     if not args.db:
@@ -141,6 +161,17 @@ def main():
             limit=args.limit,
             offset=args.offset
         )
+    elif args.command == "export":
+        from processors.exporter import ResponseExporter
+        exporter = ResponseExporter(db)
+        exporter.process(
+            output_file=args.output,
+            after=args.after,
+            before=args.before,
+            difficulty=args.difficulty,
+            status=args.status
+        )
+
     
     # db.close() # SQLAlchemy engine doesn't strictly need explicit close, but good practice if we want to dispose pool
     # db.engine.dispose() 

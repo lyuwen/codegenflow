@@ -164,8 +164,8 @@ def print_status(stats):
     if stats['matrix_stats']:
         print(f"\n   📈 Model Performance by Difficulty:")
         # Header
-        print(f"      {'Model':<40} {'Diff':<8} {'Pass%':<6} {'AvgTok':<8} {'AvgPassTok':<10} {'Solved':<8} {'TotalProb':<9} {'AvgPass/Prob':<12}")
-        print(f"      {'-'*40} {'-'*8} {'-'*6} {'-'*8} {'-'*10} {'-'*8} {'-'*9} {'-'*12}")
+        print(f"      {'Model':<40} {'Diff':<8} {'Pass%':<6} {'Passed':<8} {'AvgTok':<8} {'AvgPassTok':<10} {'Solved':<8} {'TotalProb':<9} {'AvgPass/Prob':<12}")
+        print(f"      {'-'*40} {'-'*8} {'-'*6} {'-'*8} {'-'*8} {'-'*10} {'-'*8} {'-'*9} {'-'*12}")
         
         current_model = None
         problems_per_diff = stats.get('problems_per_difficulty', {})
@@ -173,7 +173,7 @@ def print_status(stats):
         for model, difficulty, total, avg_tokens, passed_count, avg_passed_tokens, unique_passed, unique_attempted in stats['matrix_stats']:
             if model != current_model:
                 if current_model is not None:
-                    print(f"      {'-'*108}")
+                    print(f"      {'-'*116}")
                 current_model = model
             
             pass_rate = (passed_count / total) * 100 if total > 0 else 0
@@ -195,7 +195,7 @@ def print_status(stats):
             if len(diff_display) > 8:
                  diff_display = diff_display[:8]
             
-            print(f"      {model_display:<40} {diff_display:<8} {pass_rate:>5.1f}% {avg_tok:>8.0f} {avg_passed:>10.0f} {unique_passed:>8} {total_problems_in_diff:>9} {avg_passed_per_prob:>12.2f}")
+            print(f"      {model_display:<40} {diff_display:<8} {pass_rate:>5.1f}% {passed_count:>8} {avg_tok:>8.0f} {avg_passed:>10.0f} {unique_passed:>8} {total_problems_in_diff:>9} {avg_passed_per_prob:>12.2f}")
 
     # Top errors
     if stats['top_errors']:

@@ -5,7 +5,7 @@ import re
 import multiprocessing
 import traceback
 from typing import List, Dict, Any, Tuple
-from sqlalchemy import select
+from sqlalchemy import select, exists
 from tqdm import tqdm
 from database import ReasoningDatabase
 
@@ -250,11 +250,11 @@ class ResponseAnnotator:
     def __init__(self, db: ReasoningDatabase):
         self.db = db
         
-    def process(self, limit: int = 10000, offset: int = 0, concurrency: int = 8):
-        logger.info(f"Starting annotation with limit={limit}, offset={offset}, concurrency={concurrency}")
+    def process(self, limit: int = 10000, offset: int = 0, concurrency: int = 8, redo: bool = False):
+        logger.info(f"Starting annotation with limit={limit}, offset={offset}, concurrency={concurrency}, redo={redo}")
         
         # Batch size for processing
-        BATCH_SIZE = 1000
+        BATCH_SIZE = 5000
         
         # Use a streaming execution to avoid loading all rows into RAM
         with self.db.engine.connect() as conn:
@@ -268,6 +268,11 @@ class ResponseAnnotator:
                 self.db.responses.c.verification_status == 'passed'
             )
             
+            if not redo:
+                query = query.where(
+                    ~exists(select(1).where(self.db.response_annotations.c.response_id == self.db.responses.c.id))
+                )
+
             if limit:
                 query = query.limit(limit)
             if offset:

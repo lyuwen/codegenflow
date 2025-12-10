@@ -9,6 +9,7 @@ from processors.importer import ResponseImporter
 from processors.mapper import RequestMapper
 from processors.generator import PromptGenerator
 from processors.annotator import ResponseAnnotator
+from processors.updater import ResponseUpdater
 
 # Configure logging
 logging.basicConfig(
@@ -77,6 +78,19 @@ def main():
     annotate_parser.add_argument("--concurrency", type=int, default=8, help="Concurrency for annotation")
     annotate_parser.add_argument("--limit", type=int, default=10000, help="Limit number of responses")
     annotate_parser.add_argument("--offset", type=int, default=0, help="Offset")
+    annotate_parser.add_argument("--redo", action="store_true", help="Force redo annotation for all responses")
+
+    # Update Status subparser
+    update_parser = subparsers.add_parser("update-status", help="Update verification status for collection of responses")
+    update_parser.add_argument("--status", required=True, help="New status (passed, failed, pending, error)")
+    update_parser.add_argument("--file", help="Input file with IDs (JSONL or TXT)")
+    update_parser.add_argument("--after", type=parse_datetime, help="Filter: timestamp after")
+    update_parser.add_argument("--before", type=parse_datetime, help="Filter: timestamp before")
+    update_parser.add_argument("--difficulty", help="Filter: problem difficulty")
+    update_parser.add_argument("--current-status", help="Filter: current verification status")
+    update_parser.add_argument("--limit", type=int, help="Limit number of updates")
+    update_parser.add_argument("--dryrun", action="store_true", help="Dry run mode")
+
 
     # Generate subparser
     gen_parser = subparsers.add_parser("generate", help="Generate prompts for new runs")
@@ -157,7 +171,19 @@ def main():
         importer.process(db)
     elif args.command == "annotate":
         annotator = ResponseAnnotator(db)
-        annotator.process(limit=args.limit, offset=args.offset, concurrency=args.concurrency)
+        annotator.process(limit=args.limit, offset=args.offset, concurrency=args.concurrency, redo=args.redo)
+    elif args.command == "update-status":
+        updater = ResponseUpdater(db)
+        updater.process(
+            new_status=args.status,
+            input_file=args.file,
+            after=args.after,
+            before=args.before,
+            difficulty=args.difficulty,
+            current_status=args.current_status,
+            limit=args.limit,
+            dryrun=args.dryrun
+        )
     elif args.command == "generate":
         # Generator needs the DB instance or URL. 
         # The original generator took db_path. We should update it to take the db instance or url.

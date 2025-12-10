@@ -80,22 +80,27 @@ def get_stats(db):
                     count(*) FILTER (WHERE CAST(high_ngram_repetition AS TEXT) != '{}') as high_ngram_repetition,
 
                     avg(CAST(CAST(cr AS TEXT) AS FLOAT)) as avg_cr,
+                    percentile_cont(0.05) WITHIN GROUP (ORDER BY CAST(CAST(cr AS TEXT) AS FLOAT)) as p05_cr,
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY CAST(CAST(cr AS TEXT) AS FLOAT)) as p50_cr,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY CAST(CAST(cr AS TEXT) AS FLOAT)) as p95_cr,
                     
                     avg(CAST(CAST(lrr AS TEXT) AS FLOAT)) as avg_lrr,
+                    percentile_cont(0.05) WITHIN GROUP (ORDER BY CAST(CAST(lrr AS TEXT) AS FLOAT)) as p05_lrr,
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY CAST(CAST(lrr AS TEXT) AS FLOAT)) as p50_lrr,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY CAST(CAST(lrr AS TEXT) AS FLOAT)) as p95_lrr,
 
                     avg(max_line_len) as avg_mll,
+                    percentile_cont(0.05) WITHIN GROUP (ORDER BY max_line_len) as p05_mll,
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY max_line_len) as p50_mll,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY max_line_len) as p95_mll,
 
                     avg(flaw_backtracking) as avg_bt,
+                    percentile_cont(0.05) WITHIN GROUP (ORDER BY flaw_backtracking) as p05_bt,
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY flaw_backtracking) as p50_bt,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY flaw_backtracking) as p95_bt,
 
                     avg(flaw_uncertainty) as avg_uc,
+                    percentile_cont(0.05) WITHIN GROUP (ORDER BY flaw_uncertainty) as p05_uc,
                     percentile_cont(0.5) WITHIN GROUP (ORDER BY flaw_uncertainty) as p50_uc,
                     percentile_cont(0.95) WITHIN GROUP (ORDER BY flaw_uncertainty) as p95_uc
                 FROM response_annotations
@@ -271,36 +276,35 @@ def print_status(stats):
     # Annotation Stats
     if stats.get('annotation_stats') and stats['annotation_stats'][0] > 0: # Check total > 0
         astats = stats['annotation_stats']
-        # astats mapping: 
+        # astats mapping updated for P5:
         # 0:total, 1:token_rep, 2:lang_bad, 3:unsafe_cjk, 4:high_para, 5:seq_para, 6:intra_para, 7:high_ngram
-        # 8:avg_cr, 9:p50_cr, 10:p95_cr 
-        # 11:avg_lrr, 12:p50_lrr, 13:p95_lrr
-        # 14:avg_mll, 15:p50_mll, 16:p95_mll
-        # 17:avg_bt, 18:p50_bt, 19:p95_bt
-        # 20:avg_uc, 21:p50_uc, 22:p95_uc
+        # 8:avg_cr, 9:p05_cr, 10:p50_cr, 11:p95_cr 
+        # 12:avg_lrr, 13:p05_lrr, 14:p50_lrr, 15:p95_lrr
+        # 16:avg_mll, 17:p05_mll, 18:p50_mll, 19:p95_mll
+        # 20:avg_bt, 21:p05_bt, 22:p50_bt, 23:p95_bt
+        # 24:avg_uc, 25:p05_uc, 26:p50_uc, 27:p95_uc
 
-        # Convert to dict for easier access if mapping is available, but tuple index is reliable with fixed query
-        # Let's use indices based on the new query order.
-        
         print(f"\n🔍 ANNOTATION STATS")
         print(f"   Total Annotated: {format_number(astats[0])}")
         
         print(f"\n   ⚠️  Anomalies:")
         print(f"      Token Repetition:       {format_number(astats[1]):>8}")
         print(f"      Language Bad:           {format_number(astats[2]):>8}")
-        print(f"      Unsafe CJK:             {format_number(astats[3]):>8}")
+        # print(f"      Unsafe CJK:             {format_number(astats[3]):>8}")
         print(f"      High Para Count:        {format_number(astats[4]):>8}")
         print(f"      Seq Para Repeat:        {format_number(astats[5]):>8}")
         print(f"      Intra Para Repeat:      {format_number(astats[6]):>8}")
         print(f"      High N-gram Repeat:     {format_number(astats[7]):>8}")
 
-        print(f"\n   📊 Metrics (Avg | P50 | P95):")
-        print(f"      CR:                     {astats[8]:>8.4f} | {astats[9]:>8.4f} | {astats[10]:>8.4f}")
-        print(f"      LRR:                    {astats[11]:>8.4f} | {astats[12]:>8.4f} | {astats[13]:>8.4f}")
-        print(f"      Max Line Len:           {astats[14]:>8.1f} | {astats[15]:>8.1f} | {astats[16]:>8.1f}")
-        print(f"      Backtracking:           {astats[17]:>8.1f} | {astats[18]:>8.1f} | {astats[19]:>8.1f}")
-        print(f"      Uncertainty:            {astats[20]:>8.1f} | {astats[21]:>8.1f} | {astats[22]:>8.1f}")
+        print(f"\n   📊 Metrics Distribution:")
+        print(f"      {'Metric':<18} {'Avg':>8} {'P5':>8} {'P50':>8} {'P95':>8}")
+        print(f"      {'-'*18} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
         
+        print(f"      {'CR':<18} {astats[8]:8.4f} {astats[9]:8.4f} {astats[10]:8.4f} {astats[11]:8.4f}")
+        print(f"      {'LRR':<18} {astats[12]:8.4f} {astats[13]:8.4f} {astats[14]:8.4f} {astats[15]:8.4f}")
+        print(f"      {'Max Line Len':<18} {astats[16]:8.1f} {astats[17]:8.1f} {astats[18]:8.1f} {astats[19]:8.1f}")
+        print(f"      {'Backtracking':<18} {astats[20]:8.1f} {astats[21]:8.1f} {astats[22]:8.1f} {astats[23]:8.1f}")
+        print(f"      {'Uncertainty':<18} {astats[24]:8.1f} {astats[25]:8.1f} {astats[26]:8.1f} {astats[27]:8.1f}")
     print("\n" + "=" * 80)
 
 def main():

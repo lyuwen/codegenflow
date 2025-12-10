@@ -102,6 +102,24 @@ class ReasoningDatabase:
             Column('problem_id', String)
         )
 
+        self.response_annotations = Table(
+            'response_annotations', self.metadata,
+            Column('response_id', String, primary_key=True),
+            Column('cr', JSON),
+            Column('lrr', JSON),
+            Column('max_line_len', Integer),
+            Column('token_repetition', Boolean),
+            Column('lang_bad', Boolean),
+            Column('lang_reasons', JSON),
+            Column('safe_cjk', Boolean),
+            Column('flaw_backtracking', Integer),
+            Column('flaw_uncertainty', Integer),
+            Column('high_paragraph_count', Boolean),
+            Column('sequential_paragraph_repeat', Boolean),
+            Column('intra_paragraph_repetition', Boolean),
+            Column('high_ngram_repetition', JSON)
+        )
+
     def ensure_schema(self):
         """Create tables if they don't exist."""
         try:
@@ -128,6 +146,13 @@ class ReasoningDatabase:
                     col_type = "TIMESTAMP"
                     conn.execute(text(f"ALTER TABLE responses ADD COLUMN timestamp {col_type}"))
                     conn.execute(text("CREATE INDEX idx_responses_timestamp ON responses (timestamp)"))
+            
+            # Check response_annotations table
+            if not inspector.has_table('response_annotations'):
+                try:
+                    self.response_annotations.create(self.engine)
+                except Exception as e:
+                    logger.warning(f"Could not create response_annotations table (might exist): {e}")
 
             logger.info("Schema ensured.")
         except SQLAlchemyError as e:
@@ -317,21 +342,27 @@ class ReasoningDatabase:
                 stmt = self.responses.update().where(self.responses.c.id == r_id).values(**data)
                 conn.execute(stmt)
 
-    def insert_response(self, response_data: Dict[str, Any]):
-        # INSERT OR IGNORE is dialect specific.
-        # SQLite: INSERT OR IGNORE
-        # Postgres: INSERT ... ON CONFLICT DO NOTHING
-        
-        stmt = self.responses.insert().values(**response_data)
-        
+
+    def insert_responses_batch(self, responses: List[Dict[str, Any]]):
+        if not responses:
+            return
+
         if self.engine.dialect.name == 'sqlite':
-            stmt = stmt.prefix_with('OR IGNORE')
+            # For SQLite, prefix_with('OR IGNORE') logic
+            stmt = self.responses.insert().prefix_with('OR IGNORE')
         elif self.engine.dialect.name == 'postgresql':
             from sqlalchemy.dialects.postgresql import insert
-            stmt = insert(self.responses).values(**response_data).on_conflict_do_nothing()
-            
+            # For Postgres, ON CONFLICT DO NOTHING
+            stmt = insert(self.responses).on_conflict_do_nothing()
+        else:
+             # Fallback
+            stmt = self.responses.insert()
+
         with self.engine.begin() as conn:
-            conn.execute(stmt)
+            conn.execute(stmt, responses)
+
+    def insert_response(self, response_data: Dict[str, Any]):
+        self.insert_responses_batch([response_data])
 
     def insert_problem(self, problem_data: Dict[str, Any]):
         stmt = self.problems.insert().values(**problem_data)
@@ -362,3 +393,27 @@ class ReasoningDatabase:
         query = select(self.request_mappings.c.problem_id).where(self.request_mappings.c.custom_id == custom_id)
         with self.engine.connect() as conn:
             return conn.execute(query).scalar()
+
+    def insert_annotations_batch(self, annotations: List[Dict[str, Any]]):
+        if not annotations:
+            return
+            
+        if self.engine.dialect.name == 'sqlite':
+            stmt = self.response_annotations.insert().prefix_with('OR REPLACE')
+        elif self.engine.dialect.name == 'postgresql':
+            from sqlalchemy.dialects.postgresql import insert
+            stmt = insert(self.response_annotations).values(annotations)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=['response_id'],
+                set_={c.name: c for c in stmt.excluded if c.name != 'response_id'}
+            )
+        else:
+            stmt = self.response_annotations.insert()
+
+        with self.engine.begin() as conn:
+            if self.engine.dialect.name == 'postgresql':
+                conn.execute(stmt)
+            elif self.engine.dialect.name == 'sqlite':
+                 conn.execute(stmt, annotations)
+            else:
+                 conn.execute(stmt, annotations)

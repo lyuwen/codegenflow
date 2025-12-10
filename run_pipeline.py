@@ -8,6 +8,7 @@ from processors.verifier import ResponseVerifier
 from processors.importer import ResponseImporter
 from processors.mapper import RequestMapper
 from processors.generator import PromptGenerator
+from processors.annotator import ResponseAnnotator
 
 # Configure logging
 logging.basicConfig(
@@ -70,6 +71,12 @@ def main():
     # Import problems subparser
     import_problems_parser = subparsers.add_parser("import-problems", help="Import problems")
     import_problems_parser.add_argument("--pattern", help="File pattern for import-problems task")
+
+    # Annotate subparser
+    annotate_parser = subparsers.add_parser("annotate", help="Annotate passed responses with metrics")
+    annotate_parser.add_argument("--concurrency", type=int, default=8, help="Concurrency for annotation")
+    annotate_parser.add_argument("--limit", type=int, default=10000, help="Limit number of responses")
+    annotate_parser.add_argument("--offset", type=int, default=0, help="Offset")
 
     # Generate subparser
     gen_parser = subparsers.add_parser("generate", help="Generate prompts for new runs")
@@ -148,6 +155,9 @@ def main():
             return
         importer = ProblemImporter(args.pattern)
         importer.process(db)
+    elif args.command == "annotate":
+        annotator = ResponseAnnotator(db)
+        annotator.process(limit=args.limit, offset=args.offset, concurrency=args.concurrency)
     elif args.command == "generate":
         # Generator needs the DB instance or URL. 
         # The original generator took db_path. We should update it to take the db instance or url.

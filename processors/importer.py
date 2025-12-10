@@ -30,6 +30,8 @@ class ResponseImporter(Processor):
 
     def _import_file(self, database: ReasoningDatabase, file_path: str) -> int:
         count = 0
+        batch_size = 1000
+        buffer = []
         try:
             with open(file_path, 'r') as f:
                 for line in f:
@@ -81,13 +83,20 @@ class ResponseImporter(Processor):
                             "timestamp": datetime.fromtimestamp(created)
                         }
                         
-                        database.insert_response(record)
-                        count += 1
+                        buffer.append(record)
+                        if len(buffer) >= batch_size:
+                            database.insert_responses_batch(buffer)
+                            count += len(buffer)
+                            buffer = []
                         
                     except json.JSONDecodeError:
                         continue
         except Exception as e:
             logging.error(f"Error reading file {file_path}: {e}")
+            
+        if buffer:
+            database.insert_responses_batch(buffer)
+            count += len(buffer)
             
         return count
 

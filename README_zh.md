@@ -12,7 +12,11 @@
 2. **环境变量**:
    在根目录下创建一个 `.env` 文件:
    ```env
+   # PostgreSQL
    DB_URL=postgresql://user:password@host:port/database
+   
+   # 或 SQLite
+   DB_URL=sqlite:///problems.db
    ```
 
 ## 使用方法: `run_pipeline.py`

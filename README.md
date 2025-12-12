@@ -14,7 +14,11 @@ A data processing pipeline for verifying, annotating, and managing reasoning res
 2. **Environment Variables**:
    Create a `.env` file in the root directory:
    ```env
+   # PostgreSQL
    DB_URL=postgresql://user:password@host:port/database
+   
+   # Or SQLite
+   DB_URL=sqlite:///problems.db
    ```
 
 ## Usage: `run_pipeline.py`

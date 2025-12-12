@@ -1,18 +1,12 @@
 import json
 import os
 import multiprocessing
-import argparse
 from datetime import datetime
 from tqdm import tqdm
-import time
-from dotenv import load_dotenv
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, cast, Text
 from database import ReasoningDatabase
 
-# Load environment variables
-load_dotenv()
-DB_URL = os.environ.get("DB_URL")
-OUTPUT_FILE = "passed_responses-1.jsonl"
+# Default number of workers
 NUM_WORKERS = min(4, max(1, os.cpu_count() - 1))
 
 def get_problem_text(content, source):
@@ -40,7 +34,15 @@ def worker(db_url, input_queue, output_queue, filters):
             
             try:
                 # Fetch problem details
-                query = select(db.problems).where(db.problems.c.id == problem_id)
+                # Cast JSON columns to Text to avoid SQLAlchemy auto-decoding errors on invalid JSON
+                query = select(
+                    db.problems.c.id,
+                    db.problems.c.source,
+                    db.problems.c.original_id,
+                    db.problems.c.difficulty,
+                    cast(db.problems.c.problem_content, Text).label('problem_content'),
+                    cast(db.problems.c.origin, Text).label('origin')
+                ).where(db.problems.c.id == problem_id)
                 
                 with db.engine.connect() as conn:
                     prob_row = conn.execute(query).fetchone()
@@ -50,9 +52,11 @@ def worker(db_url, input_queue, output_queue, filters):
                 
                 # Build response query with filters
                 conditions = [
-                    db.responses.c.problem_id == problem_id,
-                    db.responses.c.verification_status == 'passed'
+                    db.responses.c.problem_id == problem_id
                 ]
+                
+                if filters.get('status'):
+                    conditions.append(db.responses.c.verification_status == filters['status'])
                 
                 if filters.get('after'):
                     conditions.append(db.responses.c.timestamp >= filters['after'])
@@ -136,101 +140,78 @@ def writer(output_queue, total_count, output_file):
             count += 1
         pbar.close()
 
-def parse_datetime(s):
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        try:
-            return datetime.strptime(s, "%Y-%m-%d")
-        except ValueError:
-            raise argparse.ArgumentTypeError(f"Not a valid date: {s}")
+class ResponseExporter:
+    def __init__(self, db):
+        self.db = db
 
-def main():
-    parser = argparse.ArgumentParser(description="Export passed responses")
-    parser.add_argument("--output", default=OUTPUT_FILE, help="Output JSONL file")
-    parser.add_argument("--after", type=parse_datetime, help="Filter responses after this timestamp (ISO format or YYYY-MM-DD)")
-    parser.add_argument("--before", type=parse_datetime, help="Filter responses before this timestamp (ISO format or YYYY-MM-DD)")
-    parser.add_argument("--difficulty", help="Filter by difficulty (comma-separated)")
-    
-    parser.add_argument("--db", help="Database URL or path (default: from .env)")
-    
-    args = parser.parse_args()
+    def process(self, output_file, after=None, before=None, difficulty=None, status='passed'):
+        print("Fetching problem IDs...")
+        
+        # Build query to select problem IDs
+        j = self.db.responses.join(self.db.problems, self.db.responses.c.problem_id == self.db.problems.c.id)
+        
+        conditions = []
+        
+        if status:
+            conditions.append(self.db.responses.c.verification_status == status)
+        
+        if after:
+            conditions.append(self.db.responses.c.timestamp >= after)
+        if before:
+            conditions.append(self.db.responses.c.timestamp <= before)
+        
+        if difficulty:
+            diffs = [d.strip() for d in difficulty.split(',')]
+            conditions.append(self.db.problems.c.difficulty.in_(diffs))
+            
+        query = select(self.db.responses.c.problem_id).select_from(j).where(and_(*conditions)).distinct()
+        
+        with self.db.engine.connect() as conn:
+            problem_ids = [row[0] for row in conn.execute(query).fetchall()]
+        
+        total_problems = len(problem_ids)
+        print(f"Found {total_problems} problems matching criteria.")
+        
+        if total_problems == 0:
+            return
 
-    db_url = args.db if args.db else DB_URL
-    if not db_url:
-        print("Error: DB_URL not found in .env and --db not provided")
-        return
-
-    # Get list of problems with passed responses
-    db = ReasoningDatabase(db_url)
-    print("Fetching problem IDs...")
-    
-    # Build query to select problem IDs
-    # We join responses and problems to filter by difficulty
-    # We also filter responses by status and timestamp
-    
-    j = db.responses.join(db.problems, db.responses.c.problem_id == db.problems.c.id)
-    
-    conditions = [db.responses.c.verification_status == 'passed']
-    
-    if args.after:
-        conditions.append(db.responses.c.timestamp >= args.after)
-    if args.before:
-        conditions.append(db.responses.c.timestamp <= args.before)
-    
-    if args.difficulty:
-        diffs = [d.strip() for d in args.difficulty.split(',')]
-        conditions.append(db.problems.c.difficulty.in_(diffs))
+        # Set up queues
+        input_queue = multiprocessing.Queue()
+        output_queue = multiprocessing.Queue()
         
-    query = select(db.responses.c.problem_id).select_from(j).where(and_(*conditions)).distinct()
-    
-    with db.engine.connect() as conn:
-        problem_ids = [row[0] for row in conn.execute(query).fetchall()]
-    
-    total_problems = len(problem_ids)
-    print(f"Found {total_problems} problems matching criteria.")
-    
-    if total_problems == 0:
-        return
-
-    # Set up queues
-    input_queue = multiprocessing.Queue()
-    output_queue = multiprocessing.Queue()
-    
-    # Fill input queue
-    for pid in problem_ids:
-        input_queue.put(pid)
+        # Fill input queue
+        for pid in problem_ids:
+            input_queue.put(pid)
+            
+        # Add poison pills for workers
+        for _ in range(NUM_WORKERS):
+            input_queue.put(None)
+            
+        # Prepare filters for workers
+        worker_filters = {
+            'after': after,
+            'before': before,
+            'status': status
+        }
+            
+        # Start workers
+        print(f"Starting {NUM_WORKERS} workers...")
+        workers = []
+        for _ in range(NUM_WORKERS):
+            # Pass db_url explicitly to workers
+            p = multiprocessing.Process(target=worker, args=(self.db.db_url, input_queue, output_queue, worker_filters))
+            p.start()
+            workers.append(p)
+            
+        # Start writer
+        writer_process = multiprocessing.Process(target=writer, args=(output_queue, total_problems, output_file))
+        writer_process.start()
         
-    # Add poison pills for workers
-    for _ in range(NUM_WORKERS):
-        input_queue.put(None)
+        # Wait for workers
+        for p in workers:
+            p.join()
+            
+        # Wait for writer
+        writer_process.join()
         
-    # Prepare filters for workers
-    worker_filters = {
-        'after': args.after,
-        'before': args.before
-    }
-        
-    # Start workers
-    print(f"Starting {NUM_WORKERS} workers...")
-    workers = []
-    for _ in range(NUM_WORKERS):
-        p = multiprocessing.Process(target=worker, args=(db_url, input_queue, output_queue, worker_filters))
-        p.start()
-        workers.append(p)
-        
-    # Start writer
-    writer_process = multiprocessing.Process(target=writer, args=(output_queue, total_problems, args.output))
-    writer_process.start()
-    
-    # Wait for workers
-    for p in workers:
-        p.join()
-        
-    # Wait for writer
-    writer_process.join()
-    
-    print("Export complete.")
-
-if __name__ == "__main__":
-    main()
+        print("Export complete.")

@@ -1,3 +1,5 @@
+import time
+from datetime import datetime
 import json
 import logging
 import glob
@@ -28,6 +30,8 @@ class ResponseImporter(Processor):
 
     def _import_file(self, database: ReasoningDatabase, file_path: str) -> int:
         count = 0
+        batch_size = 1000
+        buffer = []
         try:
             with open(file_path, 'r') as f:
                 for line in f:
@@ -38,19 +42,6 @@ class ResponseImporter(Processor):
                         if not custom_id:
                             continue
                             
-                        # Check if response already exists (optimization to avoid parsing if not needed)
-                        # But INSERT OR IGNORE handles it. 
-                        # However, we need problem_id.
-                        
-                        # Fix: Strip 'request-' prefix to get the correct problem ID directly
-                        # This avoids relying on request_mappings for the problem_id itself,
-                        # but we still need to know if the problem exists in the DB?
-                        # Actually, importer relies on database.get_problem_id_by_custom_id
-                        # which queries request_mappings. 
-                        # Since we are rebuilding request_mappings with the new ID format,
-                        # this lookup should work fine if mappings are populated.
-                        # BUT, if we want to be robust, we can also derive it here.
-                        
                         problem_id = database.get_problem_id_by_custom_id(custom_id)
                         if not problem_id:
                             # Fallback: try to derive it
@@ -58,7 +49,6 @@ class ResponseImporter(Processor):
                                 problem_id = custom_id[len('request-'):]
                             else:
                                 problem_id = custom_id
-                            # logging.debug(f" inferred problem_id {problem_id} for {custom_id}")
 
                         response_obj = data.get('response', {})
                         if not response_obj or 'body' not in response_obj:
@@ -72,9 +62,8 @@ class ResponseImporter(Processor):
                         full_response_text = choices[0]['message']['content']
                         model = body.get('model', 'unknown')
                         completion_tokens = body.get('usage', {}).get('completion_tokens', 0)
+                        created = body.get('created', time.time())
                         
-                        # Extract reasoning and code (reusing logic or duplicating simple logic)
-                        # Ideally we move extraction logic to a util
                         reasoning_trace = self._extract_reasoning(full_response_text, body)
                         extracted_code = self._extract_code(full_response_text)
                         
@@ -84,24 +73,38 @@ class ResponseImporter(Processor):
                             "id": response_id,
                             "problem_id": problem_id,
                             "model": model,
-                            "full_response_text": full_response_text,
-                            "full_response_json": json.dumps(response_obj),
-                            "reasoning_trace": reasoning_trace,
-                            "extracted_code": extracted_code,
+                            "full_response_text": self._sanitize_string(full_response_text),
+                            "full_response_json": response_obj, # Pass object directly
+                            "reasoning_trace": self._sanitize_string(reasoning_trace),
+                            "extracted_code": self._sanitize_string(extracted_code),
                             "completion_tokens": completion_tokens,
                             "verifiable": True, # Default
-                            "verification_status": "pending"
+                            "verification_status": "pending",
+                            "timestamp": datetime.fromtimestamp(created)
                         }
                         
-                        database.insert_response(record)
-                        count += 1
+                        buffer.append(record)
+                        if len(buffer) >= batch_size:
+                            database.insert_responses_batch(buffer)
+                            count += len(buffer)
+                            buffer = []
                         
                     except json.JSONDecodeError:
                         continue
         except Exception as e:
             logging.error(f"Error reading file {file_path}: {e}")
             
+        if buffer:
+            database.insert_responses_batch(buffer)
+            count += len(buffer)
+            
         return count
+
+    
+    def _sanitize_string(self, text):
+        if isinstance(text, str):
+            return text.replace('\x00', '')
+        return text
 
     def _extract_code(self, text):
         import re

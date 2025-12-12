@@ -131,8 +131,9 @@ class ProblemImporter(Processor):
                         if not test_cases_raw:
                              test_cases_raw = data.get('test_cases', [])
 
-                        test_cases = json.dumps(test_cases_raw)
-                        problem_content = json.dumps(data)
+                        # Pass objects directly instead of json.dumps
+                        test_cases = test_cases_raw
+                        problem_content = data
 
                         record = {
                             "id": problem_id,

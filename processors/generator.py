@@ -1,13 +1,14 @@
 import json
-import sqlite3
 import logging
 from typing import List, Dict, Optional, Any
+from sqlalchemy import select, func
+from database import ReasoningDatabase
 
 logger = logging.getLogger(__name__)
 
 class PromptGenerator:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+    def __init__(self, database: ReasoningDatabase):
+        self.database = database
 
     def generate(self, 
                  output_file: str, 
@@ -21,95 +22,87 @@ class PromptGenerator:
         """
         logger.info(f"Starting prompt generation. Output: {output_file}, Model: {model}")
         
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
         try:
             # Build query
-            query = "SELECT id, source, problem_content FROM problems WHERE 1=1"
-            params = []
-
+            query = select(self.database.problems)
+            
             if difficulty:
-                query += " AND difficulty = ?"
-                params.append(difficulty)
+                query = query.where(self.database.problems.c.difficulty == difficulty)
             
             if source:
-                query += " AND source = ?"
-                params.append(source)
+                query = query.where(self.database.problems.c.source == source)
 
-            query += " ORDER BY id"
+            query = query.order_by(self.database.problems.c.id)
 
             if limit is not None:
-                query += " LIMIT ?"
-                params.append(limit)
+                query = query.limit(limit)
             
             if offset > 0:
-                query += " OFFSET ?"
-                params.append(offset)
+                query = query.offset(offset)
 
             # Count total for progress bar
-            count_query = "SELECT COUNT(*) FROM problems WHERE 1=1"
-            count_params = []
+            count_query = select(func.count()).select_from(self.database.problems)
             if difficulty:
-                count_query += " AND difficulty = ?"
-                count_params.append(difficulty)
+                count_query = count_query.where(self.database.problems.c.difficulty == difficulty)
             if source:
-                count_query += " AND source = ?"
-                count_params.append(source)
+                count_query = count_query.where(self.database.problems.c.source == source)
             
-            cursor.execute(count_query, count_params)
-            total_count = cursor.fetchone()[0]
+            with self.database.engine.connect() as conn:
+                total_count = conn.execute(count_query).scalar()
             
             if limit is not None:
                 total_count = min(total_count, limit)
                 if offset > 0:
-                    total_count = max(0, total_count - offset) # Adjust logic if offset applies to limit or total
+                    total_count = max(0, total_count - offset)
 
-            # Re-execute main query
-            cursor.execute(query, params)
-            
             count = 0
             from tqdm import tqdm
+            
             with open(output_file, 'w') as f, tqdm(total=total_count, desc="Generating prompts") as pbar:
-                while True:
-                    row = cursor.fetchone()
-                    if not row:
-                        break
+                # Stream results
+                with self.database.engine.connect() as conn:
+                    result = conn.execution_options(stream_results=True).execute(query)
                     
-                    try:
-                        request_json = self._create_request(row, model)
-                        if request_json:
-                            f.write(json.dumps(request_json) + "\n")
-                            count += 1
-                            pbar.update(1)
-                    except Exception as e:
-                        logger.error(f"Error processing problem {row['id']}: {e}")
+                    for row in result:
+                        try:
+                            # row is a SQLAlchemy Row object, access by key works
+                            request_json = self._create_request(row._mapping, model)
+                            if request_json:
+                                f.write(json.dumps(request_json) + "\n")
+                                count += 1
+                                pbar.update(1)
+                        except Exception as e:
+                            logger.error(f"Error processing problem {row.id}: {e}")
 
             logger.info(f"Generated {count} prompts.")
 
-        finally:
-            conn.close()
+        except Exception as e:
+            logger.error(f"Generation failed: {e}")
+            raise
 
-    def _create_request(self, row: sqlite3.Row, model: str) -> Optional[Dict[str, Any]]:
+    def _create_request(self, row: Dict[str, Any], model: str) -> Optional[Dict[str, Any]]:
         """Creates the JSON request object for a single problem."""
         problem_id = row['id']
         source = row['source']
         
-        try:
-            content = json.loads(row['problem_content'])
-        except json.JSONDecodeError:
-            logger.warning(f"Invalid JSON in problem_content for {problem_id}")
-            return None
+        # SQLAlchemy handles JSON deserialization automatically for JSON columns
+        content = row['problem_content']
+        # If it's still a string (e.g. SQLite sometimes), try to parse
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in problem_content for {problem_id}")
+                return None
+        
+        if not content:
+             return None
 
         prompt_text = self._extract_prompt_text(content, source)
         if not prompt_text:
             logger.warning(f"Could not extract prompt text for {problem_id}")
             return None
 
-        # Construct the request object matching the example format
-        # {"custom_id": "request-code-apps-0", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "...", "messages": [...]}}
-        
         return {
             "custom_id": f"request-{problem_id}",
             "method": "POST",
@@ -138,6 +131,4 @@ class PromptGenerator:
         elif source == 'code_generation_lite':
             return content.get('question_content', '')
         else:
-            # codeforces, code_contests, and others usually use 'description'
-            # Some might use 'prompt' or 'question'
             return content.get('description') or content.get('prompt') or content.get('question') or ''

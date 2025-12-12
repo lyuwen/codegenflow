@@ -1,10 +1,15 @@
+from datetime import datetime
 import argparse
 import logging
+import os
+from dotenv import load_dotenv
 from database import ReasoningDatabase
 from processors.verifier import ResponseVerifier
 from processors.importer import ResponseImporter
 from processors.mapper import RequestMapper
 from processors.generator import PromptGenerator
+from processors.annotator import ResponseAnnotator
+from processors.updater import ResponseUpdater
 
 # Configure logging
 logging.basicConfig(
@@ -12,14 +17,29 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-DB_PATH = "problems.db"
+# Load environment variables from .env file
+load_dotenv()
+
+# Default to Postgres from env, or fallback to a safe default (e.g. sqlite or error)
+# User requested NOT to write raw db url in code.
+DEFAULT_DB_URL = os.environ.get("DB_URL")
 DEFAULT_SANDBOX_ENDPOINT = "http://127.0.0.1:8080"
 # DEFAULT_SANDBOX_ENDPOINT = "http://127.0.0.1:8880"
+
+
+def parse_datetime(s):
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Not a valid date: {s}")
 
 def main():
     parser = argparse.ArgumentParser(description="Reasoning Pipeline")
     # parser.add_argument("--task", choices=["verify", "import", "map", "import-problems"], required=True, help="Task to perform")
-    parser.add_argument("--db", default=DB_PATH, help="Path to SQLite database")
+    parser.add_argument("--db", default=DEFAULT_DB_URL, help="Database URL (Postgres or SQLite). Defaults to DB_URL in .env")
     parser.add_argument("--endpoint", default=DEFAULT_SANDBOX_ENDPOINT, help="Sandbox endpoint")
     parser.add_argument("--concurrency", type=int, default=8, help="Concurrency for verification")
     parser.add_argument("--limit", type=int, default=10000, help="Limit number of responses to verify")
@@ -53,6 +73,25 @@ def main():
     import_problems_parser = subparsers.add_parser("import-problems", help="Import problems")
     import_problems_parser.add_argument("--pattern", help="File pattern for import-problems task")
 
+    # Annotate subparser
+    annotate_parser = subparsers.add_parser("annotate", help="Annotate passed responses with metrics")
+    annotate_parser.add_argument("--concurrency", type=int, default=8, help="Concurrency for annotation")
+    annotate_parser.add_argument("--limit", type=int, default=10000, help="Limit number of responses")
+    annotate_parser.add_argument("--offset", type=int, default=0, help="Offset")
+    annotate_parser.add_argument("--redo", action="store_true", help="Force redo annotation for all responses")
+
+    # Update Status subparser
+    update_parser = subparsers.add_parser("update-status", help="Update verification status for collection of responses")
+    update_parser.add_argument("--status", required=True, help="New status (passed, failed, pending, error)")
+    update_parser.add_argument("--file", help="Input file with IDs (JSONL or TXT)")
+    update_parser.add_argument("--after", type=parse_datetime, help="Filter: timestamp after")
+    update_parser.add_argument("--before", type=parse_datetime, help="Filter: timestamp before")
+    update_parser.add_argument("--difficulty", help="Filter: problem difficulty")
+    update_parser.add_argument("--current-status", help="Filter: current verification status")
+    update_parser.add_argument("--limit", type=int, help="Limit number of updates")
+    update_parser.add_argument("--dryrun", action="store_true", help="Dry run mode")
+
+
     # Generate subparser
     gen_parser = subparsers.add_parser("generate", help="Generate prompts for new runs")
     gen_parser.add_argument("--output", required=True, help="Output JSONL file")
@@ -62,8 +101,22 @@ def main():
     gen_parser.add_argument("--limit", type=int, help="Limit number of prompts")
     gen_parser.add_argument("--offset", type=int, default=0, help="Offset for pagination")
     
+
+    # Export subparser
+    export_parser = subparsers.add_parser("export", help="Export passed responses")
+    export_parser.add_argument("--output", required=True, help="Output JSONL file")
+    export_parser.add_argument("--after", type=parse_datetime, help="Filter responses after this timestamp (ISO format or YYYY-MM-DD)")
+    export_parser.add_argument("--before", type=parse_datetime, help="Filter responses before this timestamp (ISO format or YYYY-MM-DD)")
+    export_parser.add_argument("--difficulty", help="Filter by difficulty (comma-separated)")
+    export_parser.add_argument("--status", default="passed", help="Filter by verification status (default: passed)")
+
     args = parser.parse_args()
     
+    if not args.db:
+        print("Error: Database URL must be provided via --db or DB_URL environment variable (.env)")
+        return
+
+    # Initialize database with URL
     db = ReasoningDatabase(args.db)
     
     if args.command == "verify":
@@ -116,9 +169,26 @@ def main():
             return
         importer = ProblemImporter(args.pattern)
         importer.process(db)
+    elif args.command == "annotate":
+        annotator = ResponseAnnotator(db)
+        annotator.process(limit=args.limit, offset=args.offset, concurrency=args.concurrency, redo=args.redo)
+    elif args.command == "update-status":
+        updater = ResponseUpdater(db)
+        updater.process(
+            new_status=args.status,
+            input_file=args.file,
+            after=args.after,
+            before=args.before,
+            difficulty=args.difficulty,
+            current_status=args.current_status,
+            limit=args.limit,
+            dryrun=args.dryrun
+        )
     elif args.command == "generate":
-        db_path = args.db
-        generator = PromptGenerator(db_path)
+        # Generator needs the DB instance or URL. 
+        # The original generator took db_path. We should update it to take the db instance or url.
+        # Let's pass the db instance.
+        generator = PromptGenerator(db)
         generator.generate(
             output_file=args.output,
             model=args.model,
@@ -127,8 +197,20 @@ def main():
             limit=args.limit,
             offset=args.offset
         )
+    elif args.command == "export":
+        from processors.exporter import ResponseExporter
+        exporter = ResponseExporter(db)
+        exporter.process(
+            output_file=args.output,
+            after=args.after,
+            before=args.before,
+            difficulty=args.difficulty,
+            status=args.status
+        )
+
     
-    db.close()
+    # db.close() # SQLAlchemy engine doesn't strictly need explicit close, but good practice if we want to dispose pool
+    # db.engine.dispose() 
 
 if __name__ == "__main__":
     main()

@@ -59,6 +59,22 @@ python run_pipeline.py import --pattern "data/*.jsonl"
 python run_pipeline.py import-problems --pattern "problems/*.jsonl"
 ```
 
+**Problem Data Format**:
+The problems file should be a JSONL file. Each line is a JSON object requiring at least a `custom_id`.
+```json
+{
+    "custom_id": "problem-123",
+    "source": "leetcode",
+    "problem": "Calculate sum of two numbers...",
+    "difficulty": "easy",
+    "test_cases": {
+        "inputs": ["1 2", "10 20"],
+        "outputs": ["3", "30"]
+    },
+    ...
+}
+```
+
 ### 3. Annotate
 Calculate metrics like repetition (CR, LRR), entropy, and reasoning flaws.
 ```bash

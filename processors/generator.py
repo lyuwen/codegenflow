@@ -131,4 +131,4 @@ class PromptGenerator:
         elif source == 'code_generation_lite':
             return content.get('question_content', '')
         else:
-            return content.get('description') or content.get('prompt') or content.get('question') or ''
+            return content.get('description') or content.get('prompt') or content.get('question') or content.get('problem') or ''

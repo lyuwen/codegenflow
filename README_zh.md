@@ -57,6 +57,22 @@ python run_pipeline.py import --pattern "data/*.jsonl"
 python run_pipeline.py import-problems --pattern "problems/*.jsonl"
 ```
 
+**问题数据格式 (Problem Data Format)**:
+问题文件应为 JSONL 格式。每行是一个 JSON 对象，至少包含 `custom_id`。
+```json
+{
+    "custom_id": "problem-123",
+    "source": "leetcode",
+    "problem": "Calculate sum of two numbers...",
+    "difficulty": "easy",
+    "test_cases": {
+        "inputs": ["1 2", "10 20"],
+        "outputs": ["3", "30"]
+    },
+    ...
+}
+```
+
 ### 3. 标注 (Annotate)
 计算指标，如重复率 (CR, LRR)、熵和推理缺陷。
 ```bash

@@ -8,7 +8,7 @@ from typing import Optional, Generator, Dict, Any, List, Union
 from datetime import datetime
 
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column, String, Integer, Boolean, 
+    create_engine, MetaData, Table, Column, String, Integer, Boolean, Float, 
     Text, TIMESTAMP, JSON, select, text, and_, or_, func, inspect
 )
 from sqlalchemy.engine import Engine, Row
@@ -119,6 +119,15 @@ class ReasoningDatabase:
             Column('intra_paragraph_repetition', Boolean),
             Column('high_ngram_repetition', JSON)
         )
+        self.problem_annotations = Table(
+            'problem_annotations', self.metadata,
+            Column('id', Integer, primary_key=True, autoincrement=True),
+            Column('problem_id', String, index=True), 
+            Column('matched_benchmark_problem', Text),
+            Column('matched_benchmark_dataset', Text),
+            Column('matched_similarity', Float)
+        )
+
 
     def ensure_schema(self):
         """Create tables if they don't exist."""
@@ -153,6 +162,13 @@ class ReasoningDatabase:
                     self.response_annotations.create(self.engine)
                 except Exception as e:
                     logger.warning(f"Could not create response_annotations table (might exist): {e}")
+            # Check problem_annotations table
+            if not inspector.has_table('problem_annotations'):
+                try:
+                    self.problem_annotations.create(self.engine)
+                except Exception as e:
+                    logger.warning(f"Could not create problem_annotations table: {e}")
+
 
             logger.info("Schema ensured.")
         except SQLAlchemyError as e:
@@ -417,3 +433,19 @@ class ReasoningDatabase:
                  conn.execute(stmt, annotations)
             else:
                  conn.execute(stmt, annotations)
+
+    def insert_problem_annotations_batch(self, annotations: List[Dict[str, Any]]):
+        if not annotations:
+            return
+            
+        if self.engine.dialect.name == 'sqlite':
+            stmt = self.problem_annotations.insert().prefix_with('OR IGNORE') 
+        elif self.engine.dialect.name == 'postgresql':
+            from sqlalchemy.dialects.postgresql import insert
+            # Just insert
+            stmt = insert(self.problem_annotations)
+        else:
+            stmt = self.problem_annotations.insert()
+
+        with self.engine.begin() as conn:
+            conn.execute(stmt, annotations)

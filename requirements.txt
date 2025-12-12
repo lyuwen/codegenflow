@@ -1,0 +1,9 @@
+sqlalchemy
+psycopg2-binary
+python-dotenv
+tqdm
+requests
+aiohttp
+numpy
+matplotlib
+openai
